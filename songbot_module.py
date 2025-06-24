@@ -3,104 +3,85 @@
 import os
 import pandas as pd
 from random import shuffle
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.docstore.document import Document
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain.agents import Tool, initialize_agent
+from langchain.memory import ConversationBufferMemory
+import re
 
-# Link langsung ke file CSV publik di GitHub
-CSV_FILE_PATH = "https://raw.githubusercontent.com/annhaura/mood-song-recommender/main/spotify_songs.csv"
+# Load CSV (from GitHub)
+CSV_URL = "https://raw.githubusercontent.com/annhaura/mood-song-recommender/main/spotify_songs.csv"
 
-# Identitas sistem
-system_identity = (
-    "You are an emotionally-aware music recommender chatbot that responds with empathy, "
-    "adapts to user's language, and explains song selections insightfully."
-)
+@staticmethod
+def normalize(text):
+    return text.lower().strip() if isinstance(text, str) else ""
+
+def load_vectorstore(api_key):
+    df = pd.read_csv(CSV_URL)
+    df["combined_text"] = df.apply(lambda row: f"{row['track_name']} by {row['track_artist']}", axis=1)
+    docs = [Document(page_content=text, metadata={"index": i}) for i, text in enumerate(df["combined_text"])]
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
+    return FAISS.from_documents(docs, embeddings)
 
 def create_agent(api_key: str):
     os.environ["GOOGLE_API_KEY"] = api_key
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7, google_api_key=api_key)
+    vectorstore = load_vectorstore(api_key)
 
-    # Inisialisasi LLM dan embedding
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7)
-    embedding_model = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-
-    # Load dataset lagu dari GitHub
-    df = pd.read_csv(CSV_FILE_PATH)
-    df["combined_text"] = df.apply(lambda row: f"{row['track_name']} by {row['track_artist']}", axis=1)
-    documents = [Document(page_content=text, metadata={"index": i}) for i, text in enumerate(df["combined_text"].tolist())]
-    vectorstore = FAISS.from_documents(documents, embedding_model)
-
-    # Local state (chat memory dan rekomendasi terakhir)
-    chat_history = []
-    last_recommendation = ""
-
-    def detect_language(text: str) -> str:
-        prompt = f"What language is this? Respond only with ISO code like 'id' or 'en'.\n\n{text}"
-        return llm.invoke(prompt).content.strip().lower()
-
-    def translate_input(text: str) -> str:
-        prompt = f"Translate this to English if it's not already:\n\n{text}"
+    # Tool 1: Genre Detector
+    def detect_genre(query):
+        prompt = f"Guess the genre from this mood or query:\n\n{query}\n\nRespond with a genre (e.g., pop, chill, rock):"
         return llm.invoke(prompt).content.strip()
 
-    def translate_back(text: str, lang_code: str) -> str:
-        prompt = f"You will translate the following text to language code '{lang_code}'. Text in double braces {{like this}} should not be translated.\n\nText:\n{text}"
-        return llm.invoke(prompt).content.strip()
+    # Tool 2: Simple Search by keyword
+    def simple_search(query):
+        df = pd.read_csv(CSV_URL)
+        mask = df["track_name"].str.contains(query, case=False, na=False) | df["track_artist"].str.contains(query, case=False, na=False)
+        results = df[mask].head(5)
+        if results.empty:
+            return "Tidak ditemukan lagu yang cocok dengan kata kunci."
+        return "\n".join([f"🎵 {row['track_name']} - {row['track_artist']}" for _, row in results.iterrows()])
 
-    def map_genre(query: str) -> str:
-        prompt = f"From this user mood or query, infer potential music genre (pop, rock, acoustic, dance, sadcore, etc).\n\nQuery: {query}"
-        return llm.invoke(prompt).content.strip().lower()
+    # Tool 3: Vector Search
+    def rag_song_search(query):
+        docs = vectorstore.similarity_search(query, k=3)
+        if not docs:
+            return "Tidak ada lagu yang mirip ditemukan."
+        return "\n".join([f"🎶 {doc.page_content}" for doc in docs])
 
-    def randomize_results(results, k=3):
-        shuffle(results)
-        return results[:k]
-
-    def retrieve_similar_songs(query: str):
-        results = vectorstore.similarity_search(query, k=10)
-        selected = randomize_results(results)
-
-        nonlocal last_recommendation
-        song_lines = []
-
-        for doc in selected:
-            raw_text = doc.page_content
-            escaped_text = raw_text.replace("{", "{{").replace("}", "}}")
-            display_text = raw_text.replace("{", "").replace("}", "")
-            song_lines.append({
-                "escaped": f"🎶 {escaped_text}",
-                "display": f"🎶 {display_text}"
-            })
-
-        last_recommendation = "\n".join([line["escaped"] for line in song_lines])
-        return "\n".join([line["display"] for line in song_lines])
-
-    def explain_recommendation(query: str, context: str = "") -> str:
+    # Tool 4: Explain Reason
+    def explain_reason(query):
+        results = rag_song_search(query)
         prompt = f"""
-{system_identity}
+You're a music expert. Based on user's mood/query: "{query}", these songs were recommended:
+{results}
 
-Conversation history (if any):
-{context}
-
-User input: {query}
-Recommended songs:
-{last_recommendation}
-
-Explain why these songs are suitable. Include breakdowns of lyrics, genre, and mood. Maintain user language style.
+Explain why each song fits. Include genre, lyrics, and vibe. Make it warm and human.
 """
         return llm.invoke(prompt).content.strip()
 
-    def smart_rag_response(user_input: str) -> str:
-        lang = detect_language(user_input)
-        input_en = translate_input(user_input) if lang != "en" else user_input
+    # Tool 5: Mood to Vibe
+    def mood_to_vibe(query):
+        prompt = f"Convert this mood into a short vibe sentence (no more than 1 line):\n{query}"
+        return llm.invoke(prompt).content.strip()
 
-        inferred_genre = map_genre(input_en)
-        songs = retrieve_similar_songs(f"{input_en}, genre: {inferred_genre}")
-        context = "\n".join([f"User: {u}\nBot: {b}" for u, b in chat_history[-2:]])
-        explanation = explain_recommendation(input_en, context)
+    # Tool 6: Random Playlist Generator
+    def random_playlist(_):
+        df = pd.read_csv(CSV_URL)
+        sample = df.sample(3)
+        return "Here's a random vibe check:\n" + "\n".join([f"🔀 {row['track_name']} - {row['track_artist']}" for _, row in sample.iterrows()])
 
-        full_response = f"\nHere are songs I picked for you:\n\n{songs}\n\n{explanation}"
-        if lang != "en":
-            full_response = translate_back(full_response, lang)
+    tools = [
+        Tool(name="GenreDetectorTool", func=detect_genre, description="Deteksi genre dari input mood atau perasaan."),
+        Tool(name="SimpleSearchTool", func=simple_search, description="Cari lagu berdasarkan kata kunci judul atau artis."),
+        Tool(name="RAGSongTool", func=rag_song_search, description="Cari lagu mirip menggunakan RAG dan vectorstore."),
+        Tool(name="ExplainRecommendationTool", func=explain_reason, description="Jelaskan alasan lagu-lagu cocok dengan mood."),
+        Tool(name="MoodToVibeTool", func=mood_to_vibe, description="Ubah input mood jadi vibe singkat."),
+        Tool(name="RandomPlaylistTool", func=random_playlist, description="Berikan playlist acak sebagai kejutan.")
+    ]
 
-        chat_history.append((user_input, full_response))
-        return full_response
+    memory = ConversationBufferMemory(memory_key="chat_history")
+    agent = initialize_agent(tools=tools, llm=llm, memory=memory, agent="zero-shot-react-description", verbose=False)
 
-    return smart_rag_response
+    return agent
