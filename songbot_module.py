@@ -7,27 +7,30 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 from langchain_community.vectorstores import FAISS
 from langchain.docstore.document import Document
 
-# Langsung load CSV dari GitHub (bukan input user)
 CSV_FILE_PATH = "https://raw.githubusercontent.com/annhaura/mood-song-recommender/main/spotify_songs.csv"
 
-# Global state
-chat_history = []
-last_recommendation = ""
-system_identity = "You are an emotionally-aware music recommender chatbot that responds with empathy, adapts to user's language, and explains song selections insightfully."
+# Identitas sistem
+system_identity = (
+    "You are an emotionally-aware music recommender chatbot that responds with empathy, "
+    "adapts to user's language, and explains song selections insightfully."
+)
 
 def create_agent(api_key: str):
     os.environ["GOOGLE_API_KEY"] = api_key
 
-    # Load LLM & Embedding
+    # Inisialisasi LLM dan embedding
     llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7)
     embedding_model = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
 
-    # Langsung load CSV
+    # Load dataset lagu dari GitHub
     df = pd.read_csv(CSV_FILE_PATH)
     df["combined_text"] = df.apply(lambda row: f"{row['track_name']} by {row['track_artist']}", axis=1)
-    docs = df["combined_text"].tolist()
-    documents = [Document(page_content=text, metadata={"index": i}) for i, text in enumerate(docs)]
+    documents = [Document(page_content=text, metadata={"index": i}) for i, text in enumerate(df["combined_text"].tolist())]
     vectorstore = FAISS.from_documents(documents, embedding_model)
+
+    # Local state (chat memory dan rekomendasi terakhir)
+    chat_history = []
+    last_recommendation = ""
 
     def detect_language(text: str) -> str:
         prompt = f"What language is this? Respond only with ISO code like 'id' or 'en'.\n\n{text}"
