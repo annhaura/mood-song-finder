@@ -1,4 +1,5 @@
- 
+# streamlit_app.py
+
 import os
 import pandas as pd
 import streamlit as st
@@ -13,10 +14,10 @@ st.title("🎵 Mood-Based Song Recommender")
 
 # --- Input API Key ---
 api_key = st.text_input("Masukkan GOOGLE_API_KEY kamu:", type="password")
-if api_key:
-    os.environ["GOOGLE_API_KEY"] = api_key
-else:
+if not api_key:
+    st.warning("🚨 Harap masukkan GOOGLE_API_KEY kamu terlebih dahulu.")
     st.stop()
+os.environ["GOOGLE_API_KEY"] = api_key
 
 # --- Load Model ---
 llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7)
@@ -52,7 +53,11 @@ def randomize_results(results, k=3):
 
 # --- Main Execution ---
 if uploaded_file:
-    df = pd.read_csv(uploaded_file)
+    try:
+        df = pd.read_csv(uploaded_file)
+    except Exception as e:
+        st.error(f"Gagal membaca file CSV: {e}")
+        st.stop()
 
     if not is_music_dataset(df):
         st.warning("🚫 Dataset tidak valid. Harap upload file lagu dengan kolom seperti 'track_name' dan 'track_artist'.")
@@ -85,6 +90,9 @@ if uploaded_file:
         explain_prompt = f"""
 You are an emotionally-aware music recommender chatbot.
 
+Conversation history:
+{context}
+
 User input: {input_en}
 Recommended songs:
 {st.session_state.last_recommendation}
@@ -93,7 +101,7 @@ Explain why these songs are suitable. Include breakdowns of lyrics, genre, and m
         """
         explanation = llm.invoke(explain_prompt).content.strip()
 
-        full_response = f"Here are songs I picked for you:\n\n{'\n'.join(song_lines)}\n\n{explanation}"
+        full_response = f"Here are songs I picked for you:\n\n{chr(10).join(song_lines)}\n\n{explanation}"
         if lang != "en":
             full_response = translate_back(full_response, lang)
 
@@ -107,4 +115,5 @@ Explain why these songs are suitable. Include breakdowns of lyrics, genre, and m
         with st.expander("Lanjut? Ganti mood?"):
             follow_up = st.text_input("Tanya atau ganti mood di sini:", key="follow")
             if follow_up:
-                st.rerun()
+                st.session_state.chat_history.append(("[Mood Switch] " + follow_up, ""))
+                st.experimental_rerun()
