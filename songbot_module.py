@@ -72,3 +72,15 @@ def create_agent(api_key: str):
         verbose=False
     )
     return agent
+    
+import streamlit as st
+
+@st.cache_resource
+def load_data_and_vectorstore():
+    df = pd.read_csv(CSV_URL)
+    df["combined"] = df["track_name"] + " by " + df["track_artist"]
+    docs = [Document(page_content=t, metadata={"source": t}) for t in df["combined"]]
+    embed = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    vs = FAISS.from_documents(docs, embed)
+    return df, vs
+
