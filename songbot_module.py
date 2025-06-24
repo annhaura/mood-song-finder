@@ -1,86 +1,80 @@
-import os, pandas as pd
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain.schema import Document
-from langchain.agents import Tool, initialize_agent
+# songbot_module.py
+
+import os
+import pandas as pd
+import random
+from langchain.vectorstores import FAISS
+from langchain.docstore.document import Document
+from langchain.embeddings import GoogleGenerativeAIEmbeddings
 from langchain.memory import ConversationBufferMemory
-from langchain.prompts import PromptTemplate
-import re
+from langchain.agents import Tool, initialize_agent
+from langchain.chat_models import ChatGoogleGenerativeAI
 
 CSV_URL = "https://raw.githubusercontent.com/annhaura/mood-song-recommender/main/spotify_songs.csv"
-
-def load_data_and_vectorstore():
-    df = pd.read_csv(CSV_URL)
-    df["combined"] = df["track_name"] + " by " + df["track_artist"]
-    docs = [Document(page_content=t, metadata={"source": t}) for t in df["combined"]]
-    embed = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    vs = FAISS.from_documents(docs, embed)
-    return df, vs
+df = pd.read_csv(CSV_URL)
+df.dropna(subset=["track_name", "track_artist"], inplace=True)
+df["full_text"] = df["track_name"] + " by " + df["track_artist"]
+docs = [Document(page_content=row, metadata={"index": i}) for i, row in enumerate(df["full_text"])]
 
 def create_agent(api_key: str):
     os.environ["GOOGLE_API_KEY"] = api_key
     llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7)
-    df, vectorstore = load_data_and_vectorstore()
-    memory = ConversationBufferMemory(memory_key="chat_history")
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
 
-    def genre_mapper(query):
-        p = PromptTemplate(
-            input_variables=["text"],
-            template="Infer a song genre from this mood or preference. Respond with one word: {text}"
-        )
-        return llm.invoke(p.format(text=query)).content.strip()
+    vectorstore = FAISS.from_documents(docs, embeddings)
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
-    def lang_detector(query):
-        p = PromptTemplate(input_variables=["text"],
-            template="Detect language of this: {text}. Just give ISO code.")
-        return llm.invoke(p.format(text=query)).content.strip()
+    def detect_mood(text):
+        prompt = f"What is the user's mood from this sentence?\n\n{text}"
+        return llm.invoke(prompt).content.strip().lower()
 
-    def translator(query):
-        p = PromptTemplate(input_variables=["text"],
-            template="Translate this to English: {text}")
-        return llm.invoke(p.format(text=query)).content.strip()
+    def map_genre(mood):
+        prompt = f"Given the user's mood '{mood}', what genre of music would suit them? Just give genre."
+        return llm.invoke(prompt).content.strip().lower()
 
-    def rag_retriever(query):
-        docs = vectorstore.similarity_search(query, k=3)
-        return "\n".join([doc.page_content for doc in docs])
+    def retrieve_songs(query):
+        result = retriever.get_relevant_documents(query)
+        if result:
+            return "\n".join([f"🎵 {doc.page_content}" for doc in result])
+        return fallback_random_songs(query)
 
-    def explain_song(query):
-        p = PromptTemplate(input_variables=["songs", "query"],
-            template="Explain why these songs match '{query}':\n{songs}")
-        return llm.invoke(p.format(songs=query, query=query)).content.strip()
+    def fallback_random_songs(_):
+        sampled = random.sample(df["full_text"].tolist(), 3)
+        return "🎲 Lagu acak untukmu:\n" + "\n".join([f"🎵 {s}" for s in sampled])
+
+    def explain_recommendation(query):
+        prompt = f"""
+Kamu adalah chatbot musik yang pintar dan empatik.
+
+User bilang: {query}
+Berikut lagu yang kamu rekomendasikan:
+{retrieve_songs(query)}
+
+Jelaskan kenapa lagu-lagu ini cocok dengan kondisi user, berdasarkan genre, mood, atau lirik.
+"""
+        return llm.invoke(prompt).content.strip()
+
+    def translate_if_needed(text, original_input):
+        prompt = f"Translate this to the same language as user input: {original_input}\n\n{text}"
+        return llm.invoke(prompt).content.strip()
 
     tools = [
-        Tool(name="GenreMapper", func=genre_mapper,
-             description="Detect song genre from user mood"),
-        Tool(name="LangDetector", func=lang_detector,
-             description="Detect user's language code"),
-        Tool(name="Translator", func=translator,
-             description="Translate non-English to English"),
-        Tool(name="RAGRetriever", func=rag_retriever,
-             description="Retrieve top song matches from dataset"),
-        Tool(name="ExplainSong", func=explain_song,
-             description="Explain why songs fit the mood"),
+        Tool(name="DetectUserMood", func=detect_mood, description="Deteksi mood dari input user."),
+        Tool(name="MapGenreFromMood", func=map_genre, description="Pilih genre dari mood user."),
+        Tool(name="RetrieveSongsRAG", func=retrieve_songs, description="Ambil lagu sesuai query dari FAISS."),
+        Tool(name="FallbackRandomSongs", func=fallback_random_songs, description="Lagu acak jika RAG tidak dapat hasil."),
+        Tool(name="ExplainRecommendation", func=explain_recommendation, description="Jelaskan alasan pemilihan lagu."),
+        Tool(name="TranslateOutput", func=translate_if_needed, description="Terjemahkan hasil jika perlu.")
     ]
 
-    llm_chain_prompt = ("You are a music recommender. Use tools based on user query."
-    " Always follow this process: detect language, translate if needed, map genre, retrieve songs, explain recommendations.")
+    memory = ConversationBufferMemory(memory_key="chat_history")
 
     agent = initialize_agent(
-        tools, llm,
+        tools=tools,
+        llm=llm,
         agent="zero-shot-react-description",
         memory=memory,
         verbose=False
     )
+
     return agent
-    
-import streamlit as st
-
-@st.cache_resource
-def load_data_and_vectorstore():
-    df = pd.read_csv(CSV_URL)
-    df["combined"] = df["track_name"] + " by " + df["track_artist"]
-    docs = [Document(page_content=t, metadata={"source": t}) for t in df["combined"]]
-    embed = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    vs = FAISS.from_documents(docs, embed)
-    return df, vs
-
