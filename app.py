@@ -10,7 +10,7 @@ from random import shuffle
 
 # --- Streamlit Setup ---
 st.set_page_config(page_title="🎵 Mood Song Finder", page_icon="🎶")
-st.title("🎶 Mood Song Finder - Agentic Fast Version")
+st.title("🎶 Mood Song Finder")
 st.markdown("Find songs that match your mood. Powered by LangChain + Gemini LLM.")
 
 # --- API Key Input ---
